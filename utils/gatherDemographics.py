@@ -11,11 +11,20 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 
 #  Module to identify the correct template use for the subject VBM analysis based on age at scan
 #  Need to get subject identifiers from inside running container in order to find the correct template from the SDK
+def find_gear_version(analyses, filename):
+    for asys in analyses:
+        for file in asys.files:
+            if file.name == filename:
+                if 'gambas' in asys.label:
+                    return asys.label.split(' ')[0]
+                elif 'mrr' in asys.label:
+                    return f"{file.gear_info.name}/{file.gear_info.version}"
+    return None
 
 def get_demo():
 
     data = []
-    cleaned_string = 'NA'
+    acquisition_cleaned = 'NA'
 
     # Read config.json file
     p = open('/flywheel/v0/config.json')
@@ -56,10 +65,17 @@ def get_demo():
             filename_without_extension = filename.split('.')[0]
             no_white_spaces = filename_without_extension.replace(" ", "")
             no_white_spaces = filename.replace(" ", "")
-            cleaned_string = re.sub(r'[^a-zA-Z0-9]', '_', no_white_spaces)
-            cleaned_string = cleaned_string.rstrip('_') # remove trailing underscore
+            acquisition_cleaned = re.sub(r'[^a-zA-Z0-9]', '_', no_white_spaces)
+            acquisition_cleaned = acquisition_cleaned.rstrip('_') # remove trailing underscore
 
-    print("cleaned_string: ", cleaned_string)
+            gear_v = find_gear_version(session.analyses, filename)
+
+            if not gear_v:
+                for acq in session.acquisitions():
+                    acq = acq.reload()
+                    gear_v = find_gear_version(acq.analyses, filename)
+                    if gear_v:
+                        break
 
     # -------------------  Get the subject age & matching template  -------------------  #
 
@@ -67,68 +83,53 @@ def get_demo():
     # Should contain the DOB in the dicom header
     # Some projects may have DOB removed, but may have age at scan in the subject container
     age = 'NA'
-    PatientSex = 'NA'
+    sex = 'NA'
     for acq in session_container.acquisitions.iter():
         # print(acq.label)
         acq = acq.reload()
 
-        if 'T2' in acq.label and 'AXI' in acq.label and 'Segmentation' not in acq.label: 
-            # pull out the acquisition label and clean
-            # no_white_spaces = acq.label.replace(" ", "")
-            # cleaned_string = re.sub(r'[^a-zA-Z0-9]', '_', no_white_spaces)
-            # cleaned_string = cleaned_string.rstrip('_') # remove trailing underscore
-
+        if 'T2' in acq.label and 'AXI' in acq.label and 'Segmentation' not in acq.label and 'Align' not in acq.label: 
             for file_obj in acq.files: # get the files in the acquisition
                 # Screen file object information & download the desired file
                 if file_obj['type'] == 'dicom':
-                    
-                    dicom_header = fw._fw.get_acquisition_file_info(acq.id, file_obj.name)
-                    SeriesDate = dicom_header.info["SeriesDate"]
+                        dicom_header = fw._fw.get_acquisition_file_info(acq.id, file_obj.name)
+                        
+                        sex = dicom_header.info.get("PatientSex",session.info.get('sex_at_birth', "NA"))
+                        dob = dicom_header.info.get('PatientBirthDate', None)
+                        series_date = dicom_header.get('SeriesDate', None)
+                        scannerSoftwareVersion = dicom_header.info.get('SoftwareVersions', None)
+                        
+                        if session.info.get('age_at_scan_months', 0) != 0:
+                            print("Checking session info for age at scan in months...")
+                            age = session.info.get('age_at_scan_months', 0)
 
-                    try:
-                        print("searching for sex in dicom header..")
-                        PatientSex = dicom_header.info.get("PatientSex", None)
-                        if PatientSex is None:
-                            print("Not found in dicom header: searching subject metadata..")
-                            PatientSex = subject.sex
+                        elif dob != None and series_date != None:
+                            # Calculate age at scan
+                            # Calculate the difference in months
+                            series_dt = datetime.strptime(series_date, '%Y%m%d')
+                            dob_dt = datetime.strptime(dob, '%Y%m%d')
+
+                            age = (series_dt.year - dob_dt.year) * 12 + (series_dt.month - dob_dt.month)
+
+                            # Adjust if the day in series_dt is earlier than the day in dob_dt
+                            if series_dt.day < dob_dt.day:
+                                age -= 1
+                        
                         else:
-                            PatientSex = "NA"
-                    except Exception as e:
-                        PatientSex = "NA"
-                        logging.error("Error encountered: ", exc_info=True)
-
-                        continue
-
-                    try:
-                        logging.debug("Before processing the variable at line 57")
-
-                        print("searching for DOB in dicom header..")
-                        PatientBirthDate = dicom_header.info.get("PatientBirthDate", None)
-                        if PatientBirthDate is None: # If not found in the primary source
-                            print("Not found in dicom header: searching for DOB in subject metadata..")
-                            datetime_obj = subject.date_of_birth
-                            # Parse the string into a datetime object
-                            PatientBirthDate = datetime_obj.strftime('%Y%m%d')
-                            print(PatientBirthDate)
-
-                        if PatientBirthDate is None:
-                            print("Not found in subject metadata: searching for DOB in session metadata..")
-                            age = int(session.age / 365 / 24 / 60 / 60) # This is in seconds
-                        if PatientBirthDate is not None:
-                            age = (datetime.strptime(SeriesDate, '%Y%m%d')) - (datetime.strptime(PatientBirthDate, '%Y%m%d'))
-                            age = age.days
-                        else:  # If not found in any source
-                            age = "NA"
-                            logging.debug("After processing the variable at line 57")
-
-                    except Exception as e:
-                        age = "NA"
-                        logging.error("Error encountered: ", exc_info=True)
-
-                        continue
+                            print("No DOB in dicom header or age in session info! Trying PatientAge from dicom...")
+                            # Need to drop the 'D' from the age and convert to int
+                            age = re.sub('\D', '', dicom_header.info.get('PatientAge', "0"))
+                           
+                        if age <= 0 or age > 1200:  # negative, 0 or 100 years
+                            age = 'NA'
+                            print("No age at scan - skipping")
+                            exit(1)
+                    
+                        print("Age: ", age)
+                        print("Sex: ", sex)
     
     # assign values to lists. 
-    data = [{'subject': subject_label, 'session': session_label, 'age': age, 'sex': PatientSex, 'acquisition': cleaned_string}]  
+    data = [{'subject': subject_label, 'session': session_label, 'age': age, 'sex': sex, 'acquisition': acquisition_cleaned, "input_gear_v": gear_v, "scannerSoftwareVersion": scannerSoftwareVersion}]  
     # Creates DataFrame.  
     demo = pd.DataFrame(data)
 
@@ -140,12 +141,12 @@ def get_demo():
     frames = [demo, vols]
     df = pd.concat(frames, axis=1)
 
-    out_name = f"{cleaned_string}_synthseg_volumes.csv"
+    out_name = f"{acquisition_cleaned}_synthseg_volumes.csv"
     outdir = ('/flywheel/v0/output/' + out_name)
     df.to_csv(outdir)
 
-    print("Demographics: ", subject_label, session_label, age, PatientSex)
-    return subject_label, session_label, age, PatientSex
+    print("Demographics: ", subject_label, session_label, age, sex)
+    return subject_label, session_label, age, sex
 
 
 

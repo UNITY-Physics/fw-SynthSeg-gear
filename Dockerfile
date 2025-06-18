@@ -19,7 +19,7 @@ RUN dnf update -y && \
     dnf clean all
 
 RUN pip3 install flywheel-gear-toolkit && \
-    pip3 install flywheel-sdk && \
+    pip3 install flywheel-sdk==19.3.0 && \
     pip3 install jsonschema && \
     pip3 install pandas 
 

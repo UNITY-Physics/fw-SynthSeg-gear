@@ -31,6 +31,9 @@ def main(context: GearToolkitContext) -> None:
     qc_command = "/flywheel/v0/utils/render.sh"
     os.system(qc_command)
 
+    reprozip_command = "reprozip pack ./output/my_experiment.rpz"
+    os.system(reprozip_command)
+
 
 # Only execute if file is run as main, not when imported by another module
 if __name__ == "__main__":  # pragma: no cover
